@@ -53,6 +53,50 @@ In order to ensure that the Laravel community is welcoming to all, please review
 
 If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
 
+## Cloud Computing 2025 Registration Portal
+
+### Local setup
+
+Requirements: PHP 8.4 with `pdo_sqlite`, Composer, and Node.js/npm.
+
+```bash
+composer install
+npm install
+```
+
+Create a local environment file (`Copy-Item .env.example .env` in PowerShell, or `cp .env.example .env` on Linux/macOS), then generate the application key and prepare SQLite:
+
+```bash
+php artisan key:generate
+php artisan migrate
+npm run build
+php artisan serve
+```
+
+The application uses `database/database.sqlite`; the file is ignored by Git. Keep the database directory and file writable by the PHP process. Do not run `key:generate` on an existing production installation because it invalidates encrypted data and sessions.
+
+### SMTP configuration
+
+Set `MAIL_USERNAME`, `MAIL_PASSWORD`, and `MAIL_FROM_ADDRESS` to credentials and a sender address you control. The example uses Purelymail SMTP on port 587 with STARTTLS. Set `APP_URL` to the application's public HTTPS origin so signed confirmation links use the correct host. `REGISTRATION_NOTIFY_EMAILS` is a comma-separated recipient list; it defaults to the two program contacts in `.env.example`.
+
+No real message is sent during automated tests. Until valid SMTP credentials are provided, email delivery is not verified; registrations are retained if delivery fails, and the success page explains that the email could not be delivered. For local UI work, set `MAIL_MAILER=log` to keep messages out of external inboxes.
+
+### Tests
+
+```bash
+php artisan test
+```
+
+The suite uses an in-memory SQLite database, an isolated array cache, and Laravel's mail fake. It does not send actual email.
+
+### Production deployment checklist
+
+- Provision PHP 8.4 with `pdo_sqlite`, Composer, and Node.js/npm. Build frontend assets with `npm ci` and `npm run build`.
+- Set production `APP_KEY`, `APP_URL` (HTTPS), `APP_ENV=production`, and `APP_DEBUG=false` in the hosting environment. Supply SMTP credentials through the host's secret store or an untracked `.env`; never commit credentials.
+- Ensure `storage/`, `bootstrap/cache/`, and the SQLite database directory/file are writable by the application process. Back up the SQLite database regularly and keep the database outside the public web root.
+- Run `php artisan migrate --force` during deployment. Do not commit the production SQLite file, `.env`, `vendor/`, or `node_modules/`.
+- Verify SMTP delivery using a test address controlled by the operator before opening registration. Do not send test messages to program recipients without authorization.
+
 ## License
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).

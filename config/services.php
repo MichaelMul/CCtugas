@@ -35,4 +35,9 @@ return [
         ],
     ],
 
+    'registration_notify_emails' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('REGISTRATION_NOTIFY_EMAILS', 'elizabeth.nathania@ciputra.ac.id,haning.kumbara@ciputra.ac.id')),
+    ))),
+
 ];
