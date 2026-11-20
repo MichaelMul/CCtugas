@@ -2,192 +2,147 @@ name: Laravel 13 CI/CD Deployment
 
 on:
   push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
+    branches: [ "main" ] # Triggers only when code is pushed to your main production branch
 
 permissions:
-  contents: read
-
-concurrency:
-  group: production-deploy
-  cancel-in-progress: false
+  contents: write
 
 jobs:
   laravel-tests:
-    name: Run tests and build assets
+    name: Run Tests & Build Assets
     runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_DATABASE: testing
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.4'
-          extensions: mbstring, pdo_sqlite, sqlite3
-          coverage: none
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.5'
+        extensions: mbstring, xml, ctype, iconv, mysql, bcmath, filter, zip
+        tools: composer:v2
+        coverage: none
 
-      - name: Prepare Laravel environment
-        run: cp .env.example .env
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
 
-      - name: Install Composer dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
+    - name: Copy Environment File
+      run: php -r "file_exists('.env') || copy('.env.example', '.env');"
 
-      - name: Generate application key
-        run: php artisan key:generate --force
+    - name: Cache Composer Dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.composer/cache/files
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
+    - name: Install Composer Dependencies
+      run: composer install --prefer-dist --no-ansi --no-interaction --no-progress --no-scripts
 
-      - name: Install NPM dependencies and build assets
-        run: |
-          npm ci
-          npm run build
+    - name: Generate Application Key
+      run: php artisan key:generate
 
-      - name: Run tests
-        run: php artisan test --compact
+    - name: Run Migrations & Tests
+      run: |
+        php artisan migrate --env=testing
+        php artisan test
+      env:
+        DB_CONNECTION: mysql
+        DB_HOST: 127.0.0.1
+        DB_PORT: 3306
+        DB_DATABASE: testing
+        DB_USERNAME: root
+        DB_PASSWORD: ""
 
-      - name: Upload built frontend assets
-        uses: actions/upload-artifact@v4
-        with:
-          name: production-assets
-          path: public/build/
-          if-no-files-found: error
-          retention-days: 1
+    # Compile frontend production assets (Vite) so they are ready for deployment
+    - name: Install NPM Dependencies & Build Assets
+      run: |
+        npm ci
+        npm run build
+
+    # Optional: Push compiled production assets back to Git if your deployment relies on Git integration
+    - name: Commit Built Assets (If required by your hosting Git sync)
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@://github.com"
+        git add public/build -f
+        git diff-index --quiet HEAD || git commit -m "chore: build production assets [skip ci]"
+        git push origin main
+      env:
+        GITHUB_TOKEN: ${{ secrets.MY_PAT }}
 
   deploy:
-    name: Deploy to CloudPanel
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: laravel-tests
+    name: Deploy to Live Hosting
+    needs: laravel-tests # Ensures deployment only happens if tests pass successfully
     runs-on: ubuntu-latest
-    environment:
-      name: production
-      url: https://mail.r0xyy.my.id
+
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: Set up PHP
-        uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.4'
-          extensions: mbstring, pdo_sqlite, sqlite3
-          coverage: none
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: '8.5'
+        extensions: mbstring, xml, ctype, iconv, bcmath, filter, zip
+        tools: composer:v2
+        coverage: none
 
-      - name: Install production Composer dependencies
-        run: composer install --no-dev --no-scripts --optimize-autoloader --prefer-dist --no-interaction --no-progress
+    - name: Cache Composer Dependencies
+      uses: actions/cache@v4
+      with:
+        path: ~/.composer/cache/files
+        key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+        restore-keys: ${{ runner.os }}-composer-
 
-      - name: Download built frontend assets
-        uses: actions/download-artifact@v4
-        with:
-          name: production-assets
-          path: public/build/
+    # vendor/ is gitignored, so it must be built here (production deps only) and
+    # shipped to the server separately, since the server does not have Composer.
+    - name: Install Production Composer Dependencies
+      run: composer install --no-dev --optimize-autoloader --prefer-dist --no-ansi --no-interaction --no-progress
 
-      - name: Package production dependencies and assets
-        run: tar -czf deployment.tar.gz vendor public/build
+    - name: Package Vendor Directory
+      run: tar -czf vendor.tar.gz vendor
 
-      - name: Configure SSH
-        env:
-          CLOUDPANEL_HOST: ${{ secrets.CLOUDPANEL_HOST }}
-          CLOUDPANEL_PORT: ${{ secrets.CLOUDPANEL_PORT }}
-          CLOUDPANEL_USER: ${{ secrets.CLOUDPANEL_USER }}
-          CLOUDPANEL_SSH_KEY: ${{ secrets.CLOUDPANEL_SSH_KEY }}
-          CLOUDPANEL_KNOWN_HOSTS: ${{ secrets.CLOUDPANEL_KNOWN_HOSTS }}
-        run: |
-          set -euo pipefail
+    - name: Upload Vendor Package to Server
+      uses: appleboy/scp-action@v1.0.0
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USERNAME }}
+        password: ${{ secrets.SSH_PASSWORD }}
+        port: 22
+        source: "vendor.tar.gz"
+        target: "/home/mail-r0xyy/htdocs/mail.r0xyy.my.id"
 
-          for name in CLOUDPANEL_HOST CLOUDPANEL_USER CLOUDPANEL_SSH_KEY CLOUDPANEL_KNOWN_HOSTS; do
-            if [[ -z "${!name}" ]]; then
-              echo "Required GitHub secret is missing: $name" >&2
-              exit 1
-            fi
-          done
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@v1.2.5
+      with:
+        host: ${{ secrets.SSH_HOST }}
+        username: ${{ secrets.SSH_USERNAME }}
+        password: ${{ secrets.SSH_PASSWORD }}
+        port: 22
+        script: |
+          cd /home/mail-r0xyy/htdocs/mail.r0xyy.my.id
+          git pull origin main
+          rm -rf vendor
+          tar -xzf vendor.tar.gz
+          rm -f vendor.tar.gz
 
-          port="${CLOUDPANEL_PORT:-22}"
-          if [[ ! "$port" =~ ^[0-9]+$ ]] || (( port < 1 || port > 65535 )); then
-            echo "CLOUDPANEL_PORT must be a valid TCP port." >&2
-            exit 1
-          fi
-
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$CLOUDPANEL_SSH_KEY" > "$HOME/.ssh/cloudpanel_deploy"
-          chmod 600 "$HOME/.ssh/cloudpanel_deploy"
-          printf '%s\n' "$CLOUDPANEL_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-          printf '%s\n' "$port" > "$HOME/.ssh/cloudpanel_port"
-
-      - name: Upload deployment package and deploy
-        env:
-          CLOUDPANEL_HOST: ${{ secrets.CLOUDPANEL_HOST }}
-          CLOUDPANEL_PORT: ${{ secrets.CLOUDPANEL_PORT }}
-          CLOUDPANEL_USER: ${{ secrets.CLOUDPANEL_USER }}
-          CLOUDPANEL_PATH: ${{ secrets.CLOUDPANEL_PATH }}
-        run: |
-          set -euo pipefail
-
-          if [[ ! "$CLOUDPANEL_USER" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-            echo "CLOUDPANEL_USER contains unsupported characters." >&2
-            exit 1
-          fi
-
-          if [[ ! "$CLOUDPANEL_HOST" =~ ^[a-zA-Z0-9.-]+$ ]]; then
-            echo "CLOUDPANEL_HOST must be a hostname or IPv4 address." >&2
-            exit 1
-          fi
-
-          if [[ ! "$CLOUDPANEL_PATH" =~ ^/[a-zA-Z0-9._/-]+$ ]]; then
-            echo "CLOUDPANEL_PATH must be an absolute path using only letters, numbers, dots, underscores, slashes, and hyphens." >&2
-            exit 1
-          fi
-
-          port="$(cat "$HOME/.ssh/cloudpanel_port")"
-          destination="$CLOUDPANEL_USER@$CLOUDPANEL_HOST"
-          ssh_options=(-i "$HOME/.ssh/cloudpanel_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes)
-
-          scp -i "$HOME/.ssh/cloudpanel_deploy" -P "$port" \
-            -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            deployment.tar.gz "$destination:$CLOUDPANEL_PATH/deployment.tar.gz"
-
-          ssh "${ssh_options[@]}" -p "$port" "$destination" \
-            "DEPLOY_PATH='$CLOUDPANEL_PATH' bash -s" <<'REMOTE'
-          set -euo pipefail
-          cd "$DEPLOY_PATH"
-
-          if [[ ! -d .git ]]; then
-            echo "Deployment path is not a Git checkout." >&2
-            exit 1
-          fi
-
-          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-            echo "CloudPanel checkout has local tracked changes; refusing to overwrite them." >&2
-            exit 1
-          fi
-
-          git pull --ff-only origin main
-
-          tar -tzf deployment.tar.gz | grep -Fxq 'vendor/autoload.php'
-          tar -tzf deployment.tar.gz | grep -Fxq 'public/build/manifest.json'
-          rm -rf .deployment-staging
-          mkdir .deployment-staging
-          tar -xzf deployment.tar.gz -C .deployment-staging
-          test -f .deployment-staging/vendor/autoload.php
-          test -f .deployment-staging/public/build/manifest.json
-          rm -rf vendor public/build
-          mv .deployment-staging/vendor vendor
-          mv .deployment-staging/public/build public/build
-          rm -rf .deployment-staging
-          rm -f deployment.tar.gz
+          rm -f bootstrap/cache/packages.php
+          rm -f bootstrap/cache/services.php
 
           php artisan package:discover --ansi
           php artisan migrate --force
-          php artisan optimize:clear
           php artisan config:cache
-          php artisan route:cache
-          php artisan view:cache
-          REMOTE
