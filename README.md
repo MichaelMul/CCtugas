@@ -91,7 +91,7 @@ The suite uses an in-memory SQLite database, an isolated array cache, and Larave
 
 ### Production deployment checklist
 
-- Provision PHP 8.4 with `pdo_sqlite`, Composer, and Node.js/npm. Build frontend assets with `npm ci` and `npm run build`.
+- Provision PHP 8.4 with `pdo_sqlite`, Git, and `tar`. Node.js/npm and Composer are used by GitHub Actions, not required on the CloudPanel server.
 - Set production `APP_KEY`, `APP_URL` (HTTPS), `APP_ENV=production`, and `APP_DEBUG=false` in the hosting environment. Supply SMTP credentials through the host's secret store or an untracked `.env`; never commit credentials.
 - Ensure `storage/`, `bootstrap/cache/`, and the SQLite database directory/file are writable by the application process. Back up the SQLite database regularly and keep the database outside the public web root.
 - Run `php artisan migrate --force` during deployment. Do not commit the production SQLite file, `.env`, `vendor/`, or `node_modules/`.
@@ -99,7 +99,7 @@ The suite uses an in-memory SQLite database, an isolated array cache, and Larave
 
 ### GitHub Actions CI/CD to CloudPanel
 
-The `.github/workflows/ci-cd.yml` workflow runs the Pest suite and builds Vite assets on pull requests and pushes to `main`. A successful push to `main` also syncs the application to CloudPanel over SSH, installs production Composer dependencies, runs database migrations, and refreshes Laravel's production caches. It preserves the server's `.env`, SQLite database, and `storage/` directory. This workflow deploys to `mail.r0xyy.my.id`; a different CloudPanel site needs its own deployment path and URL.
+The `.github/workflows/ci-cd.yml` workflow follows the professor's test/build then deploy structure, adapted to this Laravel 13 app's PHP 8.4 and SQLite stack. Pull requests and pushes to `main` run Pest and build the Vite assets. A successful push to `main` packages production Composer dependencies and assets in GitHub Actions, uploads the package over SSH, then asks CloudPanel to pull `main`, install the package, run migrations, and refresh Laravel's production caches. This workflow deploys to `mail.r0xyy.my.id`; a different CloudPanel site needs its own deployment path and URL.
 
 Before enabling automatic deployment:
 
@@ -108,14 +108,31 @@ Before enabling automatic deployment:
    - `CLOUDPANEL_PORT`: SSH port (usually `22`; optional if using that default).
    - `CLOUDPANEL_USER`: the CloudPanel site user (for example, `r0xyy-mail`).
    - `CLOUDPANEL_PATH`: absolute Laravel project path (for example, `/home/r0xyy-mail/htdocs/mail.r0xyy.my.id`).
-   - `CLOUDPANEL_SSH_KEY`: the private key for a dedicated deployment key.
+   - `CLOUDPANEL_SSH_KEY`: the private key for a dedicated Actions-to-CloudPanel SSH key.
    - `CLOUDPANEL_KNOWN_HOSTS`: verified SSH host-key line(s) for the server and port.
-2. Generate a dedicated Ed25519 SSH key pair for GitHub Actions. Add only its `.pub` key to the CloudPanel site's SSH authorized keys; store the private key as `CLOUDPANEL_SSH_KEY`. Do not reuse a personal key or paste private keys into GitHub files or chat.
-3. Verify the CloudPanel server's SSH host-key fingerprint through a trusted provider/server console before saving the matching `ssh-keyscan -H <host>` output as `CLOUDPANEL_KNOWN_HOSTS`. Strict host-key checking is enabled in the workflow.
-4. Confirm the deployment user can write to the project path and run `composer` and `php` from SSH. The public site document root must point to `<project path>/public`; keep `.env` in the project root.
-5. Push a small change to `main` and verify the **Actions** run completes. Pull requests run tests/builds but do not deploy.
-
-The deployment sync removes files no longer present in Git from the project directory, while explicitly preserving `.env`, `storage/`, `vendor/`, and SQLite files. Keep persistent uploads and the database in those preserved paths. The server must have `rsync`, Composer, PHP 8.4, and the SQLite PHP extension installed. The workflow never generates or replaces the production `APP_KEY`.
+2. Generate a dedicated Ed25519 key pair for Actions to SSH into CloudPanel. Add only the `.pub` key to the CloudPanel site's SSH authorized keys; store the private key as `CLOUDPANEL_SSH_KEY`.
+3. Give the CloudPanel site user a separate read-only GitHub deploy key so the server can run `git pull` on this private repository. In the CloudPanel terminal as the site user, generate the key and display only its public half:
+   ```bash
+   mkdir -p ~/.ssh
+   ssh-keygen -t ed25519 -N '' -C 'cloudpanel-readonly-CCtugas' -f ~/.ssh/cc_tugas_github
+   cat ~/.ssh/cc_tugas_github.pub
+   ```
+   Add that public key under the GitHub repository's **Settings → Deploy keys** with write access disabled. Keep the private key only on CloudPanel; it is not a GitHub Actions secret. Configure the site user's SSH client and switch the checkout's remote to SSH:
+   ```bash
+   cat >> ~/.ssh/config <<'EOF'
+   Host github.com
+     HostName github.com
+     User git
+     IdentityFile ~/.ssh/cc_tugas_github
+     IdentitiesOnly yes
+   EOF
+   chmod 600 ~/.ssh/config ~/.ssh/cc_tugas_github
+   git -C /home/r0xyy-mail/htdocs/mail.r0xyy.my.id remote set-url origin git@github.com:MichaelMul/CCtugas.git
+   ```
+   Verify GitHub's SSH host-key fingerprint against its published fingerprints before adding GitHub to `~/.ssh/known_hosts`, then confirm access with `git -C /home/r0xyy-mail/htdocs/mail.r0xyy.my.id ls-remote origin refs/heads/main`.
+4. Verify the CloudPanel server's SSH host-key fingerprint through a trusted provider/server console before saving the matching `ssh-keyscan -H <host>` output as `CLOUDPANEL_KNOWN_HOSTS`. GitHub publishes its SSH fingerprints in its [SSH key fingerprints documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints). Strict host-key checking is enabled for Actions-to-CloudPanel SSH.
+5. Confirm the deployment user can write to the project path and run `git`, `tar`, and `php` over SSH. The public site document root must point to `<project path>/public`; keep `.env` in the project root. The workflow leaves `.env`, SQLite files, and `storage/` untouched and does not generate or replace the production `APP_KEY`.
+6. Push a small change to `main` and verify the **Actions** run completes. Pull requests run tests/builds but do not deploy.
 
 ## License
 

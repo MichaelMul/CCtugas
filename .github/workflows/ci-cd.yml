@@ -1,4 +1,4 @@
-name: CI/CD
+name: Laravel 13 CI/CD Deployment
 
 on:
   push:
@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
-    name: Test and build
+  laravel-tests:
+    name: Run tests and build assets
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -30,13 +30,13 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3
           coverage: none
 
-      - name: Install PHP dependencies
-        run: composer install --prefer-dist --no-interaction --no-progress
-
-      - name: Prepare Laravel application
+      - name: Prepare Laravel environment
         run: |
           cp .env.example .env
           php artisan key:generate --force
+
+      - name: Install Composer dependencies
+        run: composer install --prefer-dist --no-interaction --no-progress
 
       - name: Run tests
         run: php artisan test --compact
@@ -47,13 +47,12 @@ jobs:
           node-version: '22'
           cache: npm
 
-      - name: Install JavaScript dependencies
-        run: npm ci
+      - name: Install NPM dependencies and build assets
+        run: |
+          npm ci
+          npm run build
 
-      - name: Build frontend assets
-        run: npm run build
-
-      - name: Upload production assets
+      - name: Upload built frontend assets
         uses: actions/upload-artifact@v4
         with:
           name: production-assets
@@ -64,7 +63,7 @@ jobs:
   deploy:
     name: Deploy to CloudPanel
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: test
+    needs: laravel-tests
     runs-on: ubuntu-latest
     environment:
       name: production
@@ -73,11 +72,24 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Download production assets
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3
+          coverage: none
+
+      - name: Install production Composer dependencies
+        run: composer install --no-dev --no-scripts --optimize-autoloader --prefer-dist --no-interaction --no-progress
+
+      - name: Download built frontend assets
         uses: actions/download-artifact@v4
         with:
           name: production-assets
           path: public/build/
+
+      - name: Package production dependencies and assets
+        run: tar -czf deployment.tar.gz vendor public/build
 
       - name: Configure SSH
         env:
@@ -109,7 +121,7 @@ jobs:
           chmod 600 "$HOME/.ssh/known_hosts"
           printf '%s\n' "$port" > "$HOME/.ssh/cloudpanel_port"
 
-      - name: Sync application files
+      - name: Upload deployment package and deploy
         env:
           CLOUDPANEL_HOST: ${{ secrets.CLOUDPANEL_HOST }}
           CLOUDPANEL_PORT: ${{ secrets.CLOUDPANEL_PORT }}
@@ -134,34 +146,47 @@ jobs:
           fi
 
           port="$(cat "$HOME/.ssh/cloudpanel_port")"
-          ssh_options=(-i "$HOME/.ssh/cloudpanel_deploy" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=yes)
           destination="$CLOUDPANEL_USER@$CLOUDPANEL_HOST"
+          ssh_options=(-i "$HOME/.ssh/cloudpanel_deploy" -o BatchMode=yes -o StrictHostKeyChecking=yes)
 
-          ssh "${ssh_options[@]}" "$destination" "test -d '$CLOUDPANEL_PATH' && test -w '$CLOUDPANEL_PATH'"
-          rsync -az --delete \
-            --exclude='/.env' \
-            --exclude='/.env.*' \
-            --exclude='/.git/' \
-            --exclude='/.github/' \
-            --exclude='/.claude/' \
-            --exclude='/node_modules/' \
-            --exclude='/vendor/' \
-            --exclude='/storage/' \
-            --exclude='/public/storage' \
-            --exclude='/database/*.sqlite*' \
-            -e "ssh -i $HOME/.ssh/cloudpanel_deploy -p $port -o BatchMode=yes -o StrictHostKeyChecking=yes" \
-            ./ "$destination:$CLOUDPANEL_PATH/"
+          scp -i "$HOME/.ssh/cloudpanel_deploy" -P "$port" \
+            -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            deployment.tar.gz "$destination:$CLOUDPANEL_PATH/deployment.tar.gz"
 
-      - name: Install production dependencies and migrate
-        env:
-          CLOUDPANEL_HOST: ${{ secrets.CLOUDPANEL_HOST }}
-          CLOUDPANEL_PORT: ${{ secrets.CLOUDPANEL_PORT }}
-          CLOUDPANEL_USER: ${{ secrets.CLOUDPANEL_USER }}
-          CLOUDPANEL_PATH: ${{ secrets.CLOUDPANEL_PATH }}
-        run: |
+          ssh "${ssh_options[@]}" -p "$port" "$destination" \
+            "DEPLOY_PATH='$CLOUDPANEL_PATH' bash -s" <<'REMOTE'
           set -euo pipefail
+          cd "$DEPLOY_PATH"
 
-          port="$(cat "$HOME/.ssh/cloudpanel_port")"
-          ssh_options=(-i "$HOME/.ssh/cloudpanel_deploy" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=yes)
-          ssh "${ssh_options[@]}" "$CLOUDPANEL_USER@$CLOUDPANEL_HOST" \
-            "cd '$CLOUDPANEL_PATH' && composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader && php artisan migrate --force && php artisan optimize:clear && php artisan config:cache && php artisan route:cache && php artisan view:cache"
+          if [[ ! -d .git ]]; then
+            echo "Deployment path is not a Git checkout." >&2
+            exit 1
+          fi
+
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            echo "CloudPanel checkout has local tracked changes; refusing to overwrite them." >&2
+            exit 1
+          fi
+
+          git pull --ff-only origin main
+
+          tar -tzf deployment.tar.gz | grep -Fxq 'vendor/autoload.php'
+          tar -tzf deployment.tar.gz | grep -Fxq 'public/build/manifest.json'
+          rm -rf .deployment-staging
+          mkdir .deployment-staging
+          tar -xzf deployment.tar.gz -C .deployment-staging
+          test -f .deployment-staging/vendor/autoload.php
+          test -f .deployment-staging/public/build/manifest.json
+          rm -rf vendor public/build
+          mv .deployment-staging/vendor vendor
+          mv .deployment-staging/public/build public/build
+          rm -rf .deployment-staging
+          rm -f deployment.tar.gz
+
+          php artisan package:discover --ansi
+          php artisan migrate --force
+          php artisan optimize:clear
+          php artisan config:cache
+          php artisan route:cache
+          php artisan view:cache
+          REMOTE
