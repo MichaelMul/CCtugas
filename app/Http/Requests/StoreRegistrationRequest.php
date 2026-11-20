@@ -2,10 +2,8 @@
 
 namespace App\Http\Requests;
 
-use App\Models\Registration;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Str;
-use Illuminate\Validation\Rule;
 
 class StoreRegistrationRequest extends FormRequest
 {
@@ -37,7 +35,7 @@ class StoreRegistrationRequest extends FormRequest
     {
         return [
             'full_name' => ['required', 'string', 'min:2', 'max:255'],
-            'email' => ['required', 'string', 'email:rfc', 'max:255', Rule::unique(Registration::class, 'email')],
+            'email' => ['required', 'string', 'email:rfc', 'max:255'],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
             'date_of_birth' => ['required', 'date_format:Y-m-d', 'before_or_equal:today'],
         ];
@@ -51,7 +49,6 @@ class StoreRegistrationRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'email.unique' => 'This email address is already registered.',
             'password.confirmed' => 'The password confirmation does not match.',
             'date_of_birth.before_or_equal' => 'The date of birth cannot be in the future.',
         ];

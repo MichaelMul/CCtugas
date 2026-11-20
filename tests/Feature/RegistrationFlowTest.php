@@ -93,17 +93,35 @@ it('escapes a name when it is returned to the registration form after validation
         ->assertDontSee("<script>alert('xss')</script>", false);
 });
 
-it('rejects a registration when the normalized email already exists', function () {
-    Registration::factory()->create(['email' => 'alex.morgan@example.test']);
+it('allows the same email to register more than once and notifies both teachers each time', function () {
+    Mail::fake();
+    config(['services.registration_notify_emails' => [
+        'elizabeth.nathania@ciputra.ac.id',
+        'haning.kumbara@ciputra.ac.id',
+    ]]);
 
-    $this->post(route('registrations.store'), registrationPayload([
-        'email' => 'ALEX.MORGAN@EXAMPLE.TEST',
-    ]))
-        ->assertSessionHasErrors([
-            'email' => 'This email address is already registered.',
-        ]);
+    foreach (['Alex Morgan', 'Alex Morgan Again'] as $fullName) {
+        $this->post(route('registrations.store'), registrationPayload([
+            'full_name' => $fullName,
+            'email' => 'ALEX.MORGAN@EXAMPLE.TEST',
+        ]))
+            ->assertRedirect(route('registrations.submitted'))
+            ->assertSessionHas('registration_confirmation_delivered', true);
+    }
 
-    $this->assertDatabaseCount('registrations', 1);
+    expect(Registration::query()->where('email', 'alex.morgan@example.test')->count())->toBe(2);
+    $this->assertDatabaseCount('registrations', 2);
+
+    Mail::assertSent(RegistrationConfirmationMail::class, 2);
+    Mail::assertSent(RegistrationNotificationMail::class, 4);
+    expect(Mail::sent(
+        RegistrationNotificationMail::class,
+        fn (RegistrationNotificationMail $mail): bool => $mail->hasTo('elizabeth.nathania@ciputra.ac.id'),
+    )->count())->toBe(2);
+    expect(Mail::sent(
+        RegistrationNotificationMail::class,
+        fn (RegistrationNotificationMail $mail): bool => $mail->hasTo('haning.kumbara@ciputra.ac.id'),
+    )->count())->toBe(2);
 });
 
 it('limits repeated registration submissions by ip and email', function () {
