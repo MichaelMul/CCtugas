@@ -1,4 +1,4 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+<p align="  enter"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
 
 <p align="center">
 <a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
@@ -96,6 +96,26 @@ The suite uses an in-memory SQLite database, an isolated array cache, and Larave
 - Ensure `storage/`, `bootstrap/cache/`, and the SQLite database directory/file are writable by the application process. Back up the SQLite database regularly and keep the database outside the public web root.
 - Run `php artisan migrate --force` during deployment. Do not commit the production SQLite file, `.env`, `vendor/`, or `node_modules/`.
 - Verify SMTP delivery using a test address controlled by the operator before opening registration. Do not send test messages to program recipients without authorization.
+
+### GitHub Actions CI/CD to CloudPanel
+
+The `.github/workflows/ci-cd.yml` workflow runs the Pest suite and builds Vite assets on pull requests and pushes to `main`. A successful push to `main` also syncs the application to CloudPanel over SSH, installs production Composer dependencies, runs database migrations, and refreshes Laravel's production caches. It preserves the server's `.env`, SQLite database, and `storage/` directory. This workflow deploys to `mail.r0xyy.my.id`; a different CloudPanel site needs its own deployment path and URL.
+
+Before enabling automatic deployment:
+
+1. In GitHub, open **Settings → Secrets and variables → Actions** and add these repository secrets:
+   - `CLOUDPANEL_HOST`: server hostname or IPv4 address.
+   - `CLOUDPANEL_PORT`: SSH port (usually `22`; optional if using that default).
+   - `CLOUDPANEL_USER`: the CloudPanel site user (for example, `r0xyy-mail`).
+   - `CLOUDPANEL_PATH`: absolute Laravel project path (for example, `/home/r0xyy-mail/htdocs/mail.r0xyy.my.id`).
+   - `CLOUDPANEL_SSH_KEY`: the private key for a dedicated deployment key.
+   - `CLOUDPANEL_KNOWN_HOSTS`: verified SSH host-key line(s) for the server and port.
+2. Generate a dedicated Ed25519 SSH key pair for GitHub Actions. Add only its `.pub` key to the CloudPanel site's SSH authorized keys; store the private key as `CLOUDPANEL_SSH_KEY`. Do not reuse a personal key or paste private keys into GitHub files or chat.
+3. Verify the CloudPanel server's SSH host-key fingerprint through a trusted provider/server console before saving the matching `ssh-keyscan -H <host>` output as `CLOUDPANEL_KNOWN_HOSTS`. Strict host-key checking is enabled in the workflow.
+4. Confirm the deployment user can write to the project path and run `composer` and `php` from SSH. The public site document root must point to `<project path>/public`; keep `.env` in the project root.
+5. Push a small change to `main` and verify the **Actions** run completes. Pull requests run tests/builds but do not deploy.
+
+The deployment sync removes files no longer present in Git from the project directory, while explicitly preserving `.env`, `storage/`, `vendor/`, and SQLite files. Keep persistent uploads and the database in those preserved paths. The server must have `rsync`, Composer, PHP 8.4, and the SQLite PHP extension installed. The workflow never generates or replaces the production `APP_KEY`.
 
 ## License
 
